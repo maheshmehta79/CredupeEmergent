@@ -1,0 +1,68 @@
+{
+  "summary": "Ran full Credupe NestJS backend integration suite via pytest against the Starlette proxy on port 8001. 23/23 functional tests PASS (health, envelope, auth register/login/refresh rotation, OTP devOtp flow, RBAC, loan products list+cache, eligibility match, customer PAN/Aadhaar masking, full LEAD→DISBURSED admin-driven lifecycle, customer-only CANCEL, illegal transition rejection, partner lead scoping, leads bulk, documents presign/register/download, notifications read/read-all, admin funnel & partner summary analytics). Two real backend defects surfaced along the way — see issues.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "ALL (Starlette proxy in /app/backend/server.py)",
+        "issue": "Proxy forwards upstream `Content-Encoding: gzip` response header, but httpx has already decompressed the body before returning. Any strict HTTP client (python-requests, Go net/http, browsers behind certain CDNs) receives a gzip label over plain JSON and fails to decode. Reproduces with: `curl -sS -H 'Accept-Encoding: gzip' -D - http://localhost:8001/api/v1/loan-products` — header says gzip, body is plain JSON. Fix: in _proxy(), either strip `content-encoding` and `content-length` before returning, or re-compress, or pass `Accept-Encoding: identity` to NestJS. Tests currently work around by sending `Accept-Encoding: identity` from the client.",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "POST /api/v1/leads/bulk",
+        "issue": "Express body-parser PayloadTooLargeError is thrown BEFORE the service-level 2000-row cap is checked, and the AllExceptionsFilter maps it to HTTP 500 (`request entity too large`) instead of 413. For a 2001-row payload the client sees an opaque 500 rather than the documented cap. Fix: (a) raise body-parser JSON limit in main.ts (e.g. `app.use(json({ limit: '10mb' }))`) so legitimate bulk loads up to 2000 rows succeed, and (b) map PayloadTooLargeError → 413 in AllExceptionsFilter.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/v1/auth/login, /auth/refresh, /auth/otp/verify",
+        "issue": "Returns HTTP 201 (NestJS @Post default) for what semantically is a retrieval/token-exchange. Idiomatic would be 200. Minor spec hygiene — not blocking."
+      },
+      {
+        "endpoint": "GET /api/v1/notifications",
+        "issue": "Returns a raw array under `data` instead of the paginated `{items,total,page,pageSize}` envelope used everywhere else (loan-products, leads, applications). Inconsistent with the rest of the API."
+      },
+      {
+        "endpoint": "POST /api/v1/documents/presign",
+        "issue": "Response uses `key` for the storage key, but POST /api/v1/documents requires `storageKey`. Rename to `storageKey` (or expose both) for client symmetry. DTO/spec only."
+      },
+      {
+        "endpoint": "GET /api/v1/loan-products eligibility+list",
+        "issue": "Prisma Decimal fields (amountRange.min/max, interestRateRange.*) are serialized as STRINGS in JSON. Clients must coerce. Either transform to number in the service response or document in OpenAPI."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_backend.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix Starlette proxy gzip header bug in /app/backend/server.py (strip content-encoding/content-length when returning upstream body, OR forward Accept-Encoding: identity to NestJS).",
+    "Raise body-parser JSON limit in /app/backend/src/main.ts to support the advertised 2000-row bulk leads upload.",
+    "Map PayloadTooLargeError to HTTP 413 in /app/backend/src/common/filters/all-exceptions.filter.ts.",
+    "Unify notifications list response to `{items,total,page,pageSize}` envelope.",
+    "Expose `storageKey` (or alias) in the presign response to match the register DTO.",
+    "Consider returning Decimal amounts/rates as numbers (not strings) in loan-product payloads."
+  ],
+  "critical_code_review_comments": [
+    "server.py proxy does not sanitize hop-by-hop vs content-coding headers correctly — the `excluded` set drops content-length/transfer-encoding but keeps content-encoding even though httpx has already decoded the body. This is the root cause of the gzip failure.",
+    "LoanType enum in problem statement (`PERSONAL`) differs from actual Prisma enum (`PERSONAL_LOAN`, `HOME_LOAN`, …). Keep the docs/prompt and schema aligned.",
+    "Refresh token rotation works correctly — reusing an old refresh returns 401 as expected (verified).",
+    "State machine enforcement is solid: LEAD→APPROVED directly is 400, customer non-CANCEL transitions are 403, admin drives full LEAD→LOGIN→DOC_PENDING→UNDER_REVIEW→APPROVED→DISBURSED chain, and statusHistory is populated for every step.",
+    "Customer PII masking works: raw `pan`/`aadhaar` are dropped and only `panLast4`/`aadhaarLast4` are persisted.",
+    "Partner lead scoping verified — partner list contains only their own leads; admin sees all."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py (new)",
+    "/app/backend/tests/test_backend.py (new)"
+  ],
+  "success_rate": {"backend": "100% (23/23 functional)", "frontend": "not tested (per request)"},
+  "test_credentials": "Using seeded accounts from /app/memory/test_credentials.md (admin@credupe.local / Admin@12345, customer@credupe.local / Customer@123, partner@credupe.local / Partner@123).",
+  "seed_data_creation": "No additional seed created. Tests create ephemeral customers (email `test_<uuid>@credupe.test`), loan applications (purpose=TEST_app/TEST_cancel), leads (customerName TEST_*), and documents (fileName TEST_pan.pdf). All payload prefixes are `TEST_` for easy cleanup.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Tests live at /app/backend/tests/. They run against REACT_APP_BACKEND_URL (falls back to http://localhost:8001). All clients send `Accept-Encoding: identity` to work around the Starlette proxy gzip-header bug — if that bug is fixed, the workaround in conftest.py can be removed but does no harm. Use `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/pytest_results.xml`.",
+  "rca of the issue": "Proxy gzip header bug RCA: _proxy() in server.py uses httpx.AsyncClient, which auto-decompresses the upstream body based on Content-Encoding. The function then returns the decoded body but copies the upstream headers (minus a short hop-by-hop excluded set) unchanged — so the response still carries `Content-Encoding: gzip`, but the payload is plain JSON. Clients that honor the header (requests, urllib3) explode with `zlib.error: Error -3 while decompressing data: incorrect header check`. Mitigation: add `content-encoding` to the `excluded` set in /app/backend/server.py (and also drop `content-length` if re-writing). Repro: `curl -sS -H 'Accept-Encoding: gzip' http://localhost:8001/api/v1/loan-products | python3 -c 'import sys,json; json.load(sys.stdin)'` — fails."
+}

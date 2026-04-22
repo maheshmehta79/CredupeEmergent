@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 2 retest. 33/33 tests PASS — 23-test functional regression (unchanged from iter 1) + 10 new fix-verification tests covering HIGH-1 proxy content-encoding, HIGH-2 413 vs 400 row-cap split, and all 4 MINOR fixes (auth 200s, notifications envelope, presign storageKey+key alias). Both HIGH defects from iteration 1 are resolved; the Accept-Encoding: identity workaround has been removed from conftest.py and the suite still passes cleanly against a default `Accept-Encoding: gzip, deflate` client.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/v1/auth/register, /auth/otp/request",
+        "issue": "Still return HTTP 201. Task scoped the 200-fix to login/refresh/otp/verify/logout, but register/otp-request are conceptually similar and inconsistent with the rest of the auth surface. Non-blocking; tests accept 200/201."
+      },
+      {
+        "endpoint": "POST /api/v1/documents/presign",
+        "issue": "Returns HTTP 201 (NestJS @Post default) even though it is a pure read/compute of a presigned URL. Response payload itself now correctly carries both `storageKey` and `key`. Idiomatic would be 200. Non-blocking."
+      },
+      {
+        "endpoint": "GET /api/v1/loan-products",
+        "issue": "Pre-existing (iter 1): Prisma Decimal fields (amountRange.min/max, interestRateRange.*) still serialized as STRINGS. Not regressed — just un-fixed. Clients must coerce."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_backend.py",
+    "/app/backend/tests/test_fix_verification.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional consistency: apply @HttpCode(HttpStatus.OK) to /auth/register, /auth/otp/request, /documents/presign to match the rest of the 200-response fix.",
+    "Optional: transform Prisma Decimal amountRange/interestRateRange to numbers in loan-product serializers (carried over from iter 1)."
+  ],
+  "critical_code_review_comments": [
+    "HIGH-1 fix verified: server.py now drops content-encoding/content-length and forces Accept-Encoding: identity upstream — curl with gzip-accept returns plain JSON and no content-encoding header. Raw-byte inspection confirms body does not start with 1f 8b.",
+    "HIGH-2 fix verified: 3000-row bulk leads → HTTP 400 with 'Max 2000 rows per upload' (or array form of the message); genuine >10mb payload → HTTP 413 with error.code=PAYLOAD_TOO_LARGE (was opaque 500 in iter 1).",
+    "Auth endpoints (login/refresh/otp-request/otp-verify/logout) now return HTTP 200 as advertised.",
+    "GET /notifications now returns {items,total,page,pageSize} consistent with leads/loan-products/applications.",
+    "POST /documents/presign response carries both `storageKey` and `key` with identical values — register DTO can consume storageKey directly without a rename step.",
+    "No regressions observed in auth+refresh rotation, RBAC, full LEAD→DISBURSED lifecycle, customer CANCEL, illegal-transition rejection, partner scoping, documents presign/register/download, or analytics endpoints."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py (removed Accept-Encoding: identity workaround; proxy is clean now)",
+    "/app/backend/tests/test_fix_verification.py (NEW — 10 tests covering HIGH-1, HIGH-2, and all MINOR fixes)"
+  ],
+  "success_rate": {"backend": "100% (33/33)", "frontend": "not tested (per request)"},
+  "test_credentials": "Seeded accounts from /app/memory/test_credentials.md (admin@credupe.local / Admin@12345, customer@credupe.local / Customer@123, partner@credupe.local / Partner@123).",
+  "seed_data_creation": "No new seed. Tests create ephemeral TEST_-prefixed data (customers, applications, leads, documents) as in iter 1.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All iteration-1 HIGH/MINOR defects resolved and covered by /app/backend/tests/test_fix_verification.py. Run `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/pytest_results.xml` — expect 33/33. Regression suite at test_backend.py is unchanged. Proxy gzip bug is fixed: clients can now use default Accept-Encoding. Only remaining minors are stylistic HTTP 201→200 on register/otp-request/presign and Decimal-as-string serialization.",
+  "rca of the issue": "No new critical issues found. All iter-1 fixes validated by dedicated tests: (1) HIGH-1 proxy — verified via both header-inspection (no content-encoding on response) and raw-bytes check (no 0x1f 0x8b magic); (2) HIGH-2 413 — verified via 11mb payload returning 413 PAYLOAD_TOO_LARGE and 3000-row bulk still returning 400 with the 2000-row cap message (NestJS validation may emit the message either as string or list-of-strings; test handles both)."
+}

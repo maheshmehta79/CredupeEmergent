@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 4: re-ran the full backend suite after the HIGH-3 JwtAuthGuard fix (optional-auth on @Public() routes) and the NO_MATCHING_OFFER error-code tightening. Result: 58/58 (100%). The 47/47 target from the review request is exceeded — added 11 new tests in test_optional_auth_guard.py covering (a) valid/missing/malformed/expired Bearer on the canonical optional-auth route POST /quotes, and (b) regression on protected routes /auth/me and /loan-applications/mine. All 5 review fix-points verified, no regression in the iter-2 (23) or iter-1 (10) or iter-3 quote (14) suites.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "starlette->httpx proxy header forwarding",
+        "issue": "Sending literally `Authorization: Bearer ` (empty value after 'Bearer ') returns 502 {code:PROXY_ERROR, message:\"Upstream error: Illegal header value b'Bearer '\"} because httpx rejects the blank header before it reaches Nest. Not a guard bug — all real-world bad-token cases (malformed JWT, expired signature, random string, three junk parts) correctly return 200 with userId=null. Could be handled by the proxy sanitising blank Authorization headers, but extremely low priority (no legitimate client emits an empty bearer)."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_quotes.py",
+    "/app/backend/tests/test_backend.py",
+    "/app/backend/tests/test_fix_verification.py",
+    "/app/backend/tests/test_optional_auth_guard.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: have the starlette proxy drop/normalise an Authorization header whose value is just 'Bearer ' (empty token) so it returns 401/200 consistently instead of 502 PROXY_ERROR — purely defensive, real clients don't do this."
+  ],
+  "critical_code_review_comments": [
+    "FIX VERIFIED (HIGH-3): /app/backend/src/common/guards/jwt-auth.guard.ts is now correct — on @Public() routes it still invokes super.canActivate(ctx), swallows Observable/Promise rejection, and handleRequest returns `user ?? undefined` without throwing. Protected routes fall through to stock passport-jwt (401 on missing/bad token). Confirmed by 11 dedicated tests.",
+    "FIX VERIFIED (MINOR-iter3): QuotesService.convertToApplication now throws BadRequestException({ error: 'NO_MATCHING_OFFER', message: 'No matching offer on the quote' }) and the error envelope surfaces error.code == 'NO_MATCHING_OFFER' (was 'Bad Request'). Matches the iter-2 PAYLOAD_TOO_LARGE upper-snake-case convention.",
+    "JwtAuthGuard handleRequest uses a 4th ctx arg — make sure any future code that extends this guard and overrides handleRequest keeps the same arity; the stock passport signature is (err, user, info) without context, so relying on ctx is Nest-specific (fine here, but worth a comment if another guard wants to reuse the pattern).",
+    "No regression: iter-2 (23 tests) and iter-1 fix verification (10 tests) both remain 100% green. Proxy gzip handling, 413, row cap, presign aliasing, auth 200 codes, notifications envelope, PAN/Aadhaar masking, state machine, RBAC, analytics — all unchanged.",
+    "Quote engine (iter-3, 14 tests) remains 100% green with the tightened NO_MATCHING_OFFER assertion; EMI math (16248.86 @ 10.49%/36m/500k), 24h expiresAt, Redis persistence, ranking by emi.best, RBAC on apply, productId selection, 0-offer path, Q- id prefix — all verified."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_quotes.py (tightened test_customer_apply_on_zero_offer_quote_returns_400 to assert error.code == 'NO_MATCHING_OFFER')",
+    "/app/backend/tests/test_optional_auth_guard.py (NEW — 11 tests: optional-auth on POST /quotes for valid/missing/malformed/random/three-part/expired tokens + protected-route regression on /auth/me and /loan-applications/mine)"
+  ],
+  "success_rate": {"backend": "100% (58/58)", "frontend": "not tested (per request)"},
+  "test_credentials": "Seeded accounts from /app/memory/test_credentials.md (admin@credupe.local / Admin@12345, customer@credupe.local / Customer@123, partner@credupe.local / Partner@123).",
+  "seed_data_creation": "None. Tests reuse seeded accounts and prefix any created LEAD application purpose with TEST_ (append-only funnel; same approach as iter-2/3).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/pytest_results.xml`. Expect 58/58. The canary test for the JwtAuthGuard optional-auth fix is test_optional_auth_guard.py::TestOptionalAuthOnPublicQuoteRoute::test_valid_token_populates_user_id (and the four parameterised bad-token cases). The iter-4 tightening on the apply no-offer path is tests/test_quotes.py::TestQuoteApplyConversion::test_customer_apply_on_zero_offer_quote_returns_400 which now asserts error.code == 'NO_MATCHING_OFFER'. Quote engine still Redis-only; no DB migrations.",
+  "rca of the issue": "N/A — both iter-3 defects (HIGH-3 guard short-circuit + MINOR apply error code) are verified fixed at the source: JwtAuthGuard now runs super.canActivate on @Public() routes inside a try/swallow and handleRequest returns user-or-undefined without throwing; QuotesService.convertToApplication now throws the structured { error: 'NO_MATCHING_OFFER', message: ... } which the global exception filter maps to error.code = 'NO_MATCHING_OFFER'. Only remaining curiosity is that literal `Authorization: Bearer ` (empty value) yields a 502 PROXY_ERROR at the httpx proxy layer before reaching Nest — not a guard issue."
+}

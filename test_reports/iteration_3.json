@@ -1,0 +1,54 @@
+{
+  "summary": "Iteration 3: tested the new pre-qualified-offers quote engine (3 endpoints) and re-ran the full iter-2 regression suite. 46/47 pass. The single failure is a REAL product defect (HIGH): POST /api/v1/quotes does NOT bind the authenticated user — a valid Bearer token is silently ignored and the persisted quote always has userId: null. The 33-test iter-2 regression suite is 100% green; all other quote behaviour (ranking, EMI math, 24h expiry, Redis persistence, GET 404 envelope, RBAC on /apply, productId selection, no-match 0-offer + 400 on apply) works exactly as specified.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/v1/quotes (with Authorization: Bearer <token>)",
+        "issue": "userId is always null in the persisted quote even when a valid JWT is supplied. Root cause: the route is marked @Public(), and JwtAuthGuard.canActivate returns true immediately for public routes without invoking the underlying passport-jwt strategy, so req.user is never populated. The controller reads `req.user?.sub` -> undefined -> quote.userId = null. Verified end-to-end: /auth/me returns sub=653b1c56-..., but the same token on POST /quotes yields userId: null.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/v1/quotes/:id/apply (BadRequest)",
+        "issue": "Error envelope's `error.code` is the human string 'Bad Request' instead of a stable machine code like BAD_REQUEST / NO_MATCHING_OFFER. Other endpoints (e.g. 413) return upper-snake-case codes. Cosmetic; tests handle it."
+      },
+      {
+        "endpoint": "POST /api/v1/quotes/:id/apply",
+        "issue": "On no-matching-offer the message is wrapped in an array (['No matching offer on the quote']) because of NestJS class-validator pipe formatting style — same pattern seen in iter-2 row-cap test. Non-blocking; consider returning a plain string for hand-thrown HttpExceptions."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_quotes.py",
+    "/app/backend/tests/test_backend.py",
+    "/app/backend/tests/test_fix_verification.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "FIX (HIGH): make POST /quotes actually bind the authenticated user. Cleanest fix is in /app/backend/src/common/guards/jwt-auth.guard.ts — for @Public() routes, still attempt to run the JWT strategy so req.user is populated when a token is present, but never throw on missing/invalid token. Pseudocode: `if (isPublic) { try { await super.canActivate(ctx); } catch {} return true; }` AND override handleRequest to return user-or-undefined (never throw) on public routes. Alternative: introduce an OptionalJwtAuthGuard and use it on the /quotes POST handler.",
+    "Optional consistency: return a stable upper-snake-case error.code (e.g. NO_MATCHING_OFFER) and a plain string error.message from QuotesService.convertToApplication's BadRequestException, matching the iter-2 PAYLOAD_TOO_LARGE pattern."
+  ],
+  "critical_code_review_comments": [
+    "HIGH-3 (NEW): @Public() + JwtAuthGuard short-circuit means optional-auth routes can never see req.user. This pattern will recur on any future 'works-anonymously-but-personalized-when-logged-in' route. Worth fixing centrally in JwtAuthGuard, not just on /quotes.",
+    "QuotesService.create — `processingFee = Math.round(principal * Number(o.processingFeePct)) / 100` is correct (pct is stored as e.g. '1.5' meaning 1.5%) and produces 7500 for 500k @ 1.5%. Verified against output.",
+    "EMI math is exact: monthlyEmi(500000, 10.49, 36) = 16248.86 — matches the spec's ±1 expectation precisely.",
+    "Redis key/TTL: `quote:<id>` with EX=86400 is correct; expiresAt - createdAt = 24.000h verified by test_expires_at_is_24h_after_created_at.",
+    "Sort stability: offers are sorted ASC by emi.best so bestOffer === offers[0] is enforced — verified.",
+    "RBAC on POST /:id/apply is sound: ADMIN -> 403, PARTNER -> 403, anonymous -> 401/403, CUSTOMER -> creates a LEAD with referenceNo (CRD-...) and form_data.{sourceQuoteId, expectedEmi, expectedRate, lender} all populated.",
+    "convertToApplication correctly honours the optional productId selector — picking offers[-1] (a non-best HDFC alternative) yields appliedOffer.productId === chosen.productId.",
+    "No-match path: matchOffers returns 0 offers -> bestOffer:null, offersCount:0 -> apply returns 400 'No matching offer on the quote'. Behaviour matches spec.",
+    "REGRESSION: zero breakage. All 33 iter-2 tests (auth/RBAC/products/eligibility/state-machine/leads/documents/notifications/analytics/envelope/413/proxy-gzip) still PASS unchanged."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_quotes.py (NEW — 14 tests covering the 3 quote endpoints + EMI math + persistence + RBAC + apply conversion)"
+  ],
+  "success_rate": {"backend": "97.9% (46/47) — the only failure is a real HIGH-priority product bug, not a test bug", "frontend": "not tested (per request)"},
+  "test_credentials": "Seeded accounts from /app/memory/test_credentials.md (admin@credupe.local / Admin@12345, customer@credupe.local / Customer@123, partner@credupe.local / Partner@123).",
+  "seed_data_creation": "No new seed; tests use TEST_-prefixed purpose strings on apply, but the LEAD applications they create are not auto-cleaned (acceptable for an append-only LEAD funnel; same pattern as iter-2).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/pytest_results.xml`. Expect 47/47 once the HIGH-3 JwtAuthGuard fix is in. The failing test `test_create_quote_with_jwt_binds_user_id` is the canary — it asserts that POST /quotes with a Bearer token produces a quote whose userId === /auth/me.sub. Quote engine is Redis-only (key `quote:<id>`, TTL 86400s) — no DB migrations to worry about.",
+  "rca of the issue": "Bug: POST /api/v1/quotes ignores the Authorization header. Repro: (1) login as customer -> get accessToken; (2) POST /api/v1/quotes with Authorization: Bearer <token> + valid body; (3) inspect data.userId -> null (expected: customer's user id). RCA: /app/backend/src/common/guards/jwt-auth.guard.ts L17 returns true unconditionally for @Public() routes WITHOUT calling super.canActivate(ctx), so the passport-jwt strategy never runs and req.user is never populated. The controller reads req.user?.sub (undefined) and passes undefined to QuotesService.create, which stores userId: null. Mitigation: in JwtAuthGuard.canActivate, when isPublic, still try super.canActivate(ctx) but swallow any throw; also override handleRequest(err, user) to return user (not throw) when the route is public. After the fix, the guard becomes 'optional-auth' for public routes and req.user is populated whenever a valid token is present. Same fix benefits any future personalize-if-logged-in public route."
+}

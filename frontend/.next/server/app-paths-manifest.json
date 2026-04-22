@@ -1,0 +1,9 @@
+{
+  "/calculator/[slug]/page": "app/calculator/[slug]/page.js",
+  "/page": "app/page.js",
+  "/calculators/page": "app/calculators/page.js",
+  "/personal-loan/page": "app/personal-loan/page.js",
+  "/credit-cards/page": "app/credit-cards/page.js",
+  "/login/page": "app/login/page.js",
+  "/partner-gateway/page": "app/partner-gateway/page.js"
+}
